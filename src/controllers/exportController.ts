@@ -1,5 +1,7 @@
 import { Request, Response } from 'express';
 import { encryptBundle } from '../utils/bundleCrypto';
+import { catchAsync } from '../utils/catchAsync';
+import { AppError } from '../utils/AppError';
 
 export interface ExportRequestBody {
   tokens: string[];
@@ -12,18 +14,15 @@ export interface ExportRequestBody {
   };
 }
 
-export const exportBundle = (req: Request, res: Response): void => {
-  try {
-    const { tokens, meta } = req.body as ExportRequestBody;
+export const exportBundle = catchAsync(async (req: Request, res: Response): Promise<void> => {
+  const { tokens, meta } = req.body as ExportRequestBody;
 
-    if (!Array.isArray(tokens) || tokens.length === 0) {
-      res.status(400).json({ error: 'tokens array is required and must not be empty.' });
-      return;
-    }
-    if (!meta?.company || !meta?.expiry) {
-      res.status(400).json({ error: 'meta.company and meta.expiry are required.' });
-      return;
-    }
+  if (!Array.isArray(tokens) || tokens.length === 0) {
+    throw new AppError(400, 'tokens array is required and must not be empty.');
+  }
+  if (!meta?.company || !meta?.expiry) {
+    throw new AppError(400, 'meta.company and meta.expiry are required.');
+  }
 
     const bundle = { version: 1, meta, tokens };
     const fileContent = encryptBundle(bundle);
@@ -42,13 +41,8 @@ export const exportBundle = (req: Request, res: Response): void => {
     const utf8Filename = `license-${meta.company}-${dateStr}.aglic`;
     const encodedFilename = encodeURIComponent(utf8Filename).replace(/'/g, '%27');
 
-    res.setHeader('Content-Type', 'application/octet-stream');
-    res.setHeader('Content-Disposition',
-      `attachment; filename="${filename}"; filename*=UTF-8''${encodedFilename}`);
-    res.send(fileContent);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : 'Export failed.';
-    console.error('[exportController.exportBundle]', message);
-    res.status(500).json({ error: message });
-  }
-};
+  res.setHeader('Content-Type', 'application/octet-stream');
+  res.setHeader('Content-Disposition',
+    `attachment; filename="${filename}"; filename*=UTF-8''${encodedFilename}`);
+  res.send(fileContent);
+});

@@ -8,6 +8,12 @@
  */
 import { Request, Response } from 'express';
 import { createPrivateKey, sign, KeyObject } from 'crypto';
+import { AppDataSource } from '../config/database.config';
+import { Company } from '../entities/Company.entity';
+import { LicenseRecord } from '../entities/LicenseRecord.entity';
+import { catchAsync } from '../utils/catchAsync';
+import { AppError } from '../utils/AppError';
+import { encryptToken } from '../utils/bundleCrypto';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -62,79 +68,97 @@ function buildToken(payload: LicensePayload): string {
 // ---------------------------------------------------------------------------
 // Controller
 // ---------------------------------------------------------------------------
-export const generate = (req: Request<{}, {}, LicenseRequestBody>, res: Response): Response => {
-  try {
-    const { company, licenseType, quantity, hwids, expiry } = req.body;
+export const generate = catchAsync(async (req: Request<{}, {}, LicenseRequestBody>, res: Response): Promise<Response | any> => {
+  // Destructure validated body
+  const { company, licenseType, quantity, hwids, expiry } = req.body;
 
-    // Validation — company
-    if (!company || typeof company !== 'string' || !company.trim()) {
-      return res.status(400).json({ error: 'company is required.' });
-    }
+  const issuedAt = new Date().toISOString();
+  const expiryIso = new Date(expiry).toISOString();
+  const companyName = company.trim();
 
-    // Validation — licenseType
-    if (!(['account-based', 'station-based'] as const).includes(licenseType)) {
-      return res.status(400).json({ error: 'licenseType must be "account-based" or "station-based".' });
-    }
-
-    // Validation — expiry
-    if (!expiry || isNaN(Date.parse(expiry))) {
-      return res.status(400).json({ error: 'expiry must be a valid ISO date string (yyyy-mm-dd).' });
-    }
-    if (new Date(expiry).getTime() <= Date.now()) {
-      return res.status(400).json({ error: 'expiry must be a future date.' });
-    }
-
-    const issuedAt = new Date().toISOString();
-    const expiryIso = new Date(expiry).toISOString();
-    const companyName = company.trim();
-
-    // -----------------------------------------------------------------------
-    // Station-based: one token per HWID entry
-    // -----------------------------------------------------------------------
-    if (licenseType === 'station-based') {
-      if (!Array.isArray(hwids) || hwids.length === 0) {
-        return res.status(400).json({ error: 'hwids[] is required for station-based licenses.' });
-      }
-      const cleanedHwids = hwids.map((h) => h.trim());
-      if (cleanedHwids.some((h) => !h)) {
-        return res.status(400).json({ error: 'All hardware IDs must be non-empty strings.' });
-      }
-      const uniqueHwids = new Set(cleanedHwids);
-      if (uniqueHwids.size !== cleanedHwids.length) {
-        return res.status(400).json({ error: 'Duplicate hardware IDs are not allowed.' });
-      }
-
-      const total = cleanedHwids.length;
-      const tokens = cleanedHwids.map((hwid, i) =>
-        buildToken({ company: companyName, licenseType, quantity: 1, index: i + 1, hwid, expiry: expiryIso, issuedAt })
-      );
-
-      return res.json({
-        tokens,
-        meta: { company: companyName, licenseType, hwids: cleanedHwids, expiry: expiryIso, issuedAt },
-      });
-    }
-
-    // -----------------------------------------------------------------------
-    // Account-based: N tokens, no HWID
-    // -----------------------------------------------------------------------
-    const total = Number(quantity);
-    if (!Number.isInteger(total) || total < 1) {
-      return res.status(400).json({ error: 'quantity must be a positive integer (minimum 1).' });
-    }
-
-    const tokens = Array.from({ length: total }, (_, i) =>
-      buildToken({ company: companyName, licenseType, quantity: 1, index: i + 1, hwid: null, expiry: expiryIso, issuedAt })
+  // -----------------------------------------------------------------------
+  // Station-based: one token per HWID entry
+  // -----------------------------------------------------------------------
+  if (licenseType === 'station-based') {
+    // hwids are already cleaned and validated by the middleware
+    const cleanedHwids = hwids as string[];
+    const total = cleanedHwids.length;
+    const tokens = cleanedHwids.map((hwid, i) =>
+      buildToken({ company: companyName, licenseType, quantity: 1, index: i + 1, hwid, expiry: expiryIso, issuedAt })
     );
+
+    // Save to database
+    try {
+      const companyRepo = AppDataSource.getRepository(Company);
+      const recordRepo = AppDataSource.getRepository(LicenseRecord);
+
+      let companyEntity = await companyRepo.findOne({ where: { name: companyName } });
+      if (!companyEntity) {
+        companyEntity = companyRepo.create({ name: companyName });
+        await companyRepo.save(companyEntity);
+      }
+
+      const records = cleanedHwids.map((hwid, i) =>
+        recordRepo.create({
+          companyId: companyEntity.id,
+          licenseType,
+          quantity: 1,
+          hwid,
+          validUntil: new Date(expiryIso),
+          encryptedToken: encryptToken(tokens[i]),
+        })
+      );
+      await recordRepo.save(records);
+    } catch (dbErr) {
+      console.error('[licenseController.generate] DB Save Error:', dbErr);
+      // Continue and return tokens even if DB save fails
+    }
 
     return res.json({
       tokens,
-      meta: { company: companyName, licenseType, hwid: null, expiry: expiryIso, issuedAt },
+      meta: { company: companyName, licenseType, hwids: cleanedHwids, expiry: expiryIso, issuedAt },
     });
-
-  } catch (err) {
-    const message = err instanceof Error ? err.message : 'Unknown error';
-    console.error('[licenseController.generate]', message);
-    return res.status(500).json({ error: message });
   }
-};
+
+  // -----------------------------------------------------------------------
+  // Account-based: N tokens, no HWID
+  // -----------------------------------------------------------------------
+  // quantity is already validated and cast to Number by the middleware
+  const total = quantity;
+
+  const tokens = Array.from({ length: total }, (_, i) =>
+    buildToken({ company: companyName, licenseType, quantity: 1, index: i + 1, hwid: null, expiry: expiryIso, issuedAt })
+  );
+
+  // Save to database
+  try {
+    const companyRepo = AppDataSource.getRepository(Company);
+    const recordRepo = AppDataSource.getRepository(LicenseRecord);
+
+    let companyEntity = await companyRepo.findOne({ where: { name: companyName } });
+    if (!companyEntity) {
+      companyEntity = companyRepo.create({ name: companyName });
+      await companyRepo.save(companyEntity);
+    }
+
+    const records = tokens.map((token) =>
+      recordRepo.create({
+        companyId: companyEntity.id,
+        licenseType,
+        quantity: 1,
+        hwid: null,
+        validUntil: new Date(expiryIso),
+        encryptedToken: encryptToken(token),
+      })
+    );
+    await recordRepo.save(records);
+  } catch (dbErr) {
+    console.error('[licenseController.generate] DB Save Error:', dbErr);
+    // Continue and return tokens even if DB save fails
+  }
+
+  res.json({
+    tokens,
+    meta: { company: companyName, licenseType, hwid: null, expiry: expiryIso, issuedAt },
+  });
+});

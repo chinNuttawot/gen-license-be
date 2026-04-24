@@ -19,3 +19,5 @@ yarn-error.log*
 
 # Generated Files
 *.aglic
+
+/src/generated/prisma

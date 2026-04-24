@@ -70,3 +70,20 @@ export function decryptBundle(fileContent: string, bundleKeyB64: string): object
   const plain = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
   return JSON.parse(plain.toString('utf8'));
 }
+
+/**
+ * Encrypt a single license token string for database storage.
+ */
+export function encryptToken(token: string): string {
+  // Reuse encryptBundle to wrap the token in an encrypted envelope
+  return encryptBundle({ token });
+}
+
+/**
+ * Decrypt a license token string from the database.
+ */
+export function decryptToken(encryptedData: string): string {
+  const keyB64 = loadBundleKey().toString('base64');
+  const payload = decryptBundle(encryptedData, keyB64) as { token: string };
+  return payload.token;
+}
