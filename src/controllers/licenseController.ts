@@ -8,12 +8,8 @@
  */
 import { Request, Response } from 'express';
 import { createPrivateKey, sign, KeyObject } from 'crypto';
-import { AppDataSource } from '../config/database.config';
-import { Company } from '../entities/Company.entity';
-import { LicenseRecord } from '../entities/LicenseRecord.entity';
 import { catchAsync } from '../utils/catchAsync';
 import { AppError } from '../utils/AppError';
-import { encryptToken } from '../utils/bundleCrypto';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -87,33 +83,6 @@ export const generate = catchAsync(async (req: Request<{}, {}, LicenseRequestBod
       buildToken({ company: companyName, licenseType, quantity: 1, index: i + 1, hwid, expiry: expiryIso, issuedAt })
     );
 
-    // Save to database
-    try {
-      const companyRepo = AppDataSource.getRepository(Company);
-      const recordRepo = AppDataSource.getRepository(LicenseRecord);
-
-      let companyEntity = await companyRepo.findOne({ where: { name: companyName } });
-      if (!companyEntity) {
-        companyEntity = companyRepo.create({ name: companyName });
-        await companyRepo.save(companyEntity);
-      }
-
-      const records = cleanedHwids.map((hwid, i) =>
-        recordRepo.create({
-          companyId: companyEntity.id,
-          licenseType,
-          quantity: 1,
-          hwid,
-          validUntil: new Date(expiryIso),
-          encryptedToken: encryptToken(tokens[i]),
-        })
-      );
-      await recordRepo.save(records);
-    } catch (dbErr) {
-      console.error('[licenseController.generate] DB Save Error:', dbErr);
-      // Continue and return tokens even if DB save fails
-    }
-
     return res.json({
       tokens,
       meta: { company: companyName, licenseType, hwids: cleanedHwids, expiry: expiryIso, issuedAt },
@@ -129,33 +98,6 @@ export const generate = catchAsync(async (req: Request<{}, {}, LicenseRequestBod
   const tokens = Array.from({ length: total }, (_, i) =>
     buildToken({ company: companyName, licenseType, quantity: 1, index: i + 1, hwid: null, expiry: expiryIso, issuedAt })
   );
-
-  // Save to database
-  try {
-    const companyRepo = AppDataSource.getRepository(Company);
-    const recordRepo = AppDataSource.getRepository(LicenseRecord);
-
-    let companyEntity = await companyRepo.findOne({ where: { name: companyName } });
-    if (!companyEntity) {
-      companyEntity = companyRepo.create({ name: companyName });
-      await companyRepo.save(companyEntity);
-    }
-
-    const records = tokens.map((token) =>
-      recordRepo.create({
-        companyId: companyEntity.id,
-        licenseType,
-        quantity: 1,
-        hwid: null,
-        validUntil: new Date(expiryIso),
-        encryptedToken: encryptToken(token),
-      })
-    );
-    await recordRepo.save(records);
-  } catch (dbErr) {
-    console.error('[licenseController.generate] DB Save Error:', dbErr);
-    // Continue and return tokens even if DB save fails
-  }
 
   res.json({
     tokens,

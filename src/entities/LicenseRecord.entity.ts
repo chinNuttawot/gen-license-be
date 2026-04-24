@@ -24,7 +24,7 @@ export class LicenseRecord {
   @Column({ type: "text", nullable: true })
   encryptedToken!: string | null;
 
-  @CreateDateColumn()
+  @Column({ type: "timestamp" })
   generatedAt!: Date;
 
   @ManyToOne(() => Company, (company) => company.licenses, { onDelete: "CASCADE" })

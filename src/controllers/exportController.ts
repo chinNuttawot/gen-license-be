@@ -1,7 +1,10 @@
 import { Request, Response } from 'express';
-import { encryptBundle } from '../utils/bundleCrypto';
+import { encryptBundle, encryptToken } from '../utils/bundleCrypto';
 import { catchAsync } from '../utils/catchAsync';
 import { AppError } from '../utils/AppError';
+import { AppDataSource } from '../config/database.config';
+import { Company } from '../entities/Company.entity';
+import { LicenseRecord } from '../entities/LicenseRecord.entity';
 
 export interface ExportRequestBody {
   tokens: string[];
@@ -24,10 +27,82 @@ export const exportBundle = catchAsync(async (req: Request, res: Response): Prom
     throw new AppError(400, 'meta.company and meta.expiry are required.');
   }
 
-    const bundle = { version: 1, meta, tokens };
-    const fileContent = encryptBundle(bundle);
+  const bundle = { version: 1, meta, tokens };
+  const fileContent = encryptBundle(bundle);
 
-    // Build filename — support non-ASCII company names (Thai, CJK, etc.)
+  // -------------------------------------------------------------------------
+  // Save to Database (Moved from Generate Phase)
+  // -------------------------------------------------------------------------
+  try {
+    const companyRepo = AppDataSource.getRepository(Company);
+    const recordRepo = AppDataSource.getRepository(LicenseRecord);
+
+    const generatedAtDate = new Date(meta.issuedAt);
+
+    // Check for duplicate export (to prevent double DB saving)
+    const existingCompany = await companyRepo.findOne({ where: { name: meta.company } });
+    let isDuplicate = false;
+    
+    if (existingCompany) {
+      const existingRecord = await recordRepo.findOne({
+        where: {
+          companyId: existingCompany.id,
+          generatedAt: generatedAtDate,
+        }
+      });
+      if (existingRecord) {
+        isDuplicate = true;
+      }
+    }
+
+    if (!isDuplicate) {
+      let companyEntity = existingCompany;
+      if (!companyEntity) {
+        companyEntity = companyRepo.create({ name: meta.company });
+        await companyRepo.save(companyEntity);
+      }
+
+      const expiryDate = new Date(meta.expiry);
+      const recordsToSave = [];
+
+      if (meta.licenseType === 'station-based' && meta.hwids && meta.hwids.length > 0) {
+        // One record per HWID
+        for (let i = 0; i < tokens.length; i++) {
+          recordsToSave.push(recordRepo.create({
+            companyId: companyEntity.id,
+            licenseType: meta.licenseType,
+            quantity: 1,
+            hwid: meta.hwids[i] || null,
+            validUntil: expiryDate,
+            generatedAt: generatedAtDate,
+            encryptedToken: encryptToken(tokens[i]),
+          }));
+        }
+      } else {
+        // Account-based: Save each token
+        for (let i = 0; i < tokens.length; i++) {
+          recordsToSave.push(recordRepo.create({
+            companyId: companyEntity.id,
+            licenseType: meta.licenseType,
+            quantity: 1,
+            hwid: null,
+            validUntil: expiryDate,
+            generatedAt: generatedAtDate,
+            encryptedToken: encryptToken(tokens[i]),
+          }));
+        }
+      }
+      await recordRepo.save(recordsToSave);
+      console.log(`[Export] Saved ${recordsToSave.length} records to DB.`);
+    } else {
+      console.log(`[Export] Duplicate export detected for issuedAt=${meta.issuedAt}. Skipping DB save.`);
+    }
+  } catch (dbErr) {
+    console.error('[exportController.exportBundle] DB Save Error:', dbErr);
+    // Ignore error, allow export to proceed and return file
+  }
+
+  // Build filename — support non-ASCII company names (Thai, CJK, etc.)
     let dateStr: string;
     try { dateStr = new Date(meta.issuedAt).toISOString().slice(0, 10); }
     catch { dateStr = new Date().toISOString().slice(0, 10); }
